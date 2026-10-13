@@ -17,8 +17,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from schema_engine import (Model, build_erd, decode_sql_bytes, erd_objects, group_color, impact_dot,
-                           is_generated, parse_query, type_rank)
+from schema_engine import Model, build_erd, cluster_of, decode_sql_bytes, erd_objects, impact_dot
+from tree_component import index_of, schema_tree
 
 st.set_page_config(page_title="Schema Reader", page_icon="🗄️", layout="wide")
 
@@ -50,8 +50,10 @@ st.markdown("""
 ss = st.session_state
 for k, v in dict(sel=None, recent=[], favs=set(), domain_names={}, nav=0, up_key=0, use_sample=False,
                  model=None, model_sig=None, workspace="Explorer", detail_tab="Definition",
-                 line_depth=3, impact_depth=6).items():
+                 line_depth=3, impact_depth=6, tree_seq=None, tree_remote=None, pending_view=None).items():
     ss.setdefault(k, v)
+if ss.pending_view:
+    ss.workspace, ss.pending_view = ss.pending_view, None
 
 
 def label(d):
@@ -171,7 +173,7 @@ if not M.list:
     st.warning("No CREATE statements were found in those files. Is this a schema script?")
     st.stop()
 
-if ss.sel not in M.objects:
+if ss.sel not in M.objects and ss.sel != "__loose":
     ss.sel = None
 
 
@@ -208,20 +210,6 @@ with st.sidebar:
     st.radio("Workspace", WORKSPACES, key="workspace", horizontal=True)
     st.divider()
 
-    if ss.workspace == "Explorer":
-        q = st.text_input("Search", placeholder="names, columns, types…",
-                          help="Plain words match names, columns, types, keys, indexes and domains. "
-                               "Field prefixes narrow a term: col:email, type:decimal, schema:sales, "
-                               "is:view, ref:customer, code:throw, domain:order. Quote phrases with \"…\".")
-        deep = st.toggle("Search inside code", value=False)
-        mode = st.selectbox("Hierarchy", list(MODES), format_func=MODES.get)
-        present = sorted({o.type for o in M.list}, key=lambda t: (type_rank(t), t))
-        types = st.multiselect("Object types", present, default=present)
-        hide_gen = st.toggle("Hide generated objects", value=False,
-                             help="sys*, *_bak, *_old, *_tmp, *_history and similar")
-        fav_only = st.toggle("Favourites only", value=False)
-        st.divider()
-
     st.download_button("Export data dictionary (.md)", M.data_dictionary(label), file_name="data-dictionary.md",
                        mime="text/markdown", width="stretch")
 
@@ -229,83 +217,45 @@ with st.sidebar:
 # =========================================================================
 # EXPLORER
 # =========================================================================
-def render_browser():
-    objs = [o for o in M.list if o.type in types and not (hide_gen and is_generated(o))
-            and not (fav_only and o.id not in ss.favs)]
-    where = {}
-    if q:
-        res = M.search(q, deep) or []
-        rank = {r[0]: i for i, r in enumerate(res)}
-        where = {r[0]: ", ".join(r[2]) for r in res}
-        objs = sorted((o for o in objs if o.id in rank), key=lambda o: rank[o.id])
-
-    # pinned: favourites and recently viewed
-    favs = [i for i in ss.favs if i in M.objects]
-    if favs:
-        nav_pills("★ Favourites", sorted(favs, key=lambda i: M.objects[i].name.lower()), "favp")
-    rec = [i for i in ss.recent if i in M.objects and i != ss.sel][:8]
-    if rec:
-        nav_pills("Recently viewed", rec, "recp")
-
-    # hierarchy drill-down
-    levels = {"db-schema-type": [("Database", lambda o: o.group), ("Schema", lambda o: o.schema or "(no schema)"),
-                                 ("Type", lambda o: o.type)],
-              "schema-type": [("Schema", lambda o: o.schema or "(no schema)"), ("Type", lambda o: o.type)],
-              "type": [("Type", lambda o: o.type)],
-              "domain": [("Domain", lambda o: M.domain_of(o)), ("Type", lambda o: o.type)],
-              "file": [("File", lambda o: o.file), ("Type", lambda o: o.type)],
-              "flat": []}[mode]
-    if mode == "db-schema-type" and not M.multi_db:
-        levels = levels[1:]
-    if levels:
-        cols = st.columns(len(levels))
-        for (name, fn), col in zip(levels, cols):
-            counts = {}
-            for o in objs:
-                counts[fn(o)] = counts.get(fn(o), 0) + 1
-            if name == "Type":
-                vals = sorted(counts, key=lambda t: (type_rank(t), t))
-            elif name == "Domain":
-                vals = sorted(counts, key=lambda d: (-counts[d], d))
-            else:
-                vals = sorted(counts, key=str.lower)
-            fmt = (lambda v, c=counts, n=name: "All" if v is None else
-                   f"{label(v) if n == 'Domain' else v} ({c[v]})")
-            pick = col.selectbox(name, [None] + vals, format_func=fmt)
-            if pick is not None:
-                objs = [o for o in objs if fn(o) == pick]
-
-    if not objs:
-        if q:
-            st.info(f'Nothing matches "{q}".' + ("" if deep else " Turn on *Search inside code* to search definitions too."))
-        elif fav_only:
-            st.info("No favourites yet — open an object and press ☆ Favourite.")
-        else:
-            st.info("Every object is filtered out. Switch some types back on.")
+def render_tree():
+    ev = schema_tree(M, ss.sel, ss.favs, ss.recent, dict(ss.domain_names), remote=ss.tree_remote, height=760)
+    if not ev or ev.get("seq") == ss.tree_seq:
         return
-
-    rows = []
-    for o in objs:
-        s = M.st(o.id)
-        r = {"": ICON.get(o.type, "•") + (" ★" if o.id in ss.favs else ""), "Name": o.qname, "Type": o.type}
-        if M.multi_db:
-            r["Database"] = o.group
-        r.update({"Cols": s["cols"] or None, "FK out": s["fks"] or None, "FK in": s["in_fk"] or None,
-                  "Refs": s["refs"] or None, "Used by": s["ref_by"] or None})
-        if q:
-            r["Matched on"] = where.get(o.id, "")
-        rows.append(r)
-    st.caption(f"{len(objs):,} of {len(M.list):,} objects — click a row to open it")
-    nav_table(pd.DataFrame(rows), [o.id for o in objs], "browser", height=min(620, 38 + 35 * len(rows)),
-              column_config={"": st.column_config.TextColumn(width=40),
-                             "Name": st.column_config.TextColumn(width="medium")})
-
-    if M.loose and not q:
-        with st.expander(f"Other statements ({len(M.loose)}) — not tied to a single object"):
-            st.code("\n\n".join(s.text for s in M.loose), language="sql")
+    ss.tree_seq = ev["seq"]
+    act = ev.get("action")
+    i = ev.get("i")
+    oid = M.list[i].id if isinstance(i, int) and 0 <= i < len(M.list) else None
+    if act == "open" and oid:
+        goto(oid, tab=ev.get("tab"))
+    elif act == "loose":
+        ss.sel = "__loose"
+    elif act == "fav" and oid:
+        toggle_fav(oid)          # the tree already shows it; the header button reads it below
+    elif act == "diagram" and oid:
+        goto(oid)
+        ss.pending_view = "Diagram"
+        st.rerun()
+    elif act == "rename":
+        names = dict(ss.domain_names)
+        if (ev.get("name") or "").strip():
+            names[ev["key"]] = ev["name"].strip()
+        else:
+            names.pop(ev.get("key"), None)
+        ss.domain_names = names
+    elif act == "search":
+        q, deep = ev.get("q") or "", bool(ev.get("deep"))
+        ix = index_of(M)
+        hits = [[ix[r[0]], r[1]] for r in (M.search(q, deep) or []) if r[0] in ix]
+        ss.tree_remote = {"q": q, "deep": deep, "hits": hits}
+        st.rerun()               # hand the results back to the tree
 
 
 def render_detail():
+    if ss.sel == "__loose":
+        st.markdown("#### ≡ Other statements")
+        st.markdown('<div class="meta">not tied to a single object</div>', unsafe_allow_html=True)
+        st.code("\n\n".join(x.text for x in M.loose), language="sql")
+        return
     o = M.objects.get(ss.sel)
     if not o:
         st.info("Pick an object on the left. Its definition, columns, relationships, lineage and impact appear here.")
@@ -526,7 +476,6 @@ def render_diagram():
     hops = c[1].number_input("Neighbourhood (hops)", 0, 10, value=0 if len(base) <= 120 else 2,
                              help="0 draws everything; otherwise only objects within this many links of the focus")
     tdepth = c[2].number_input("Trace depth", 1, 10, value=4)
-    from schema_engine import cluster_of
     all_keys = sorted({cluster_of(M, o, cluster, label) for o in base}) if cluster != "none" else []
     hidden = c[3].multiselect("Hide groups", all_keys) if len(all_keys) > 1 else []
 
@@ -763,9 +712,9 @@ def render_files():
 # ROUTER
 # =========================================================================
 if ss.workspace == "Explorer":
-    left, right = st.columns([5, 7], gap="large")
+    left, right = st.columns([4, 7], gap="medium")
     with left:
-        render_browser()
+        render_tree()
     with right:
         render_detail()
 elif ss.workspace == "Diagram":

@@ -10,6 +10,8 @@ or Oracle DDL and explore objects, relationships, lineage, change impact and an 
 |---|---|
 | `app.py` | The Streamlit app (entry point) |
 | `schema_engine.py` | Parser and analysis engines (no Streamlit dependency) |
+| `tree_component.py` | The object tree as a Streamlit custom component |
+| `tree_frontend/index.html` | The tree's front end — the original page's windowed tree, no build step |
 | `sample.sql` | Sample retail schema behind the **Load sample** button |
 | `requirements.txt` | Python packages |
 | `packages.txt` | System package (Graphviz) — enables the **Download SVG** button on Streamlit Cloud |
@@ -31,10 +33,13 @@ streamlit run app.py
 
 ## What's where
 
-- **Explorer** — drill down by Database › Schema › Type (or Schema, Type, Domain, File, Flat),
-  search with field prefixes (`col:email`, `type:decimal`, `is:view`, `ref:customer`, `code:throw`,
-  `domain:order`), and open any object to see its Definition, Columns, Relationships, Keys & indexes,
-  Used by, Lineage and Impact (risk score + impact graph). Favourites and recently viewed are pinned at the top.
+- **Explorer** — the original object tree: Database › Schema › Type › Object (or Schema, Type, Domain,
+  File, Flat, Dependency and Lineage views), tables opening into Columns, Keys, Indexes, Triggers and
+  Used By folders, Favourites and Recently viewed pinned at the top, a type filter, a right-click menu and
+  arrow-key navigation (`/` searches, `F` favourites, `I` impact, `L` lineage, `D` diagram).
+  Search takes field prefixes (`col:email`, `type:decimal`, `is:view`, `ref:customer`, `code:throw`,
+  `domain:order`); **In code** also searches inside definitions. Click any object to see its Definition,
+  Columns, Relationships, Keys & indexes, Used by, Lineage and Impact (risk score + impact graph).
 - **Diagram** — Graphviz ER diagram: tables and/or views, clustered by database, schema or domain,
   lineage tracing around a focused object, neighbourhood mode for large schemas, DOT/SVG download.
 - **Dashboard** — inventory KPIs, top referenced / most connected tables, dependency hotspots,
